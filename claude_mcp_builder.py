@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import base64
 from anthropic import Anthropic
 import open3d as o3d
 import numpy as np
@@ -53,20 +54,23 @@ class ClaudeMCPBuilder:
         # Create output directories if they don't exist
         os.makedirs("output", exist_ok=True)
         
+    def _encode_image(self, image_path: str) -> str:
+        """Encode image file to base64 string"""
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+            return base64.b64encode(image_bytes).decode('utf-8')
+        
     async def generate_model(self, side1_path: str, side2_path: str, side3_path: str) -> tuple[str, str]:
         """
         Generate a 3D model from three side images using Claude 3.7 MCP
         """
-        # Read local image files
-        with open(side1_path, 'rb') as f:
-            side1 = f.read()
-        with open(side2_path, 'rb') as f:
-            side2 = f.read()
-        with open(side3_path, 'rb') as f:
-            side3 = f.read()
+        # Read and encode images
+        side1_b64 = self._encode_image(side1_path)
+        side2_b64 = self._encode_image(side2_path)
+        side3_b64 = self._encode_image(side3_path)
 
         # Create prompt for Claude
-        prompt = self._create_prompt(side1, side2, side3)
+        prompt = self._create_prompt()
         
         # Calculate approximate input tokens
         total_input_tokens = self.BASE_PROMPT_TOKENS + (self.IMAGE_TOKENS * 3)
@@ -81,75 +85,277 @@ class ClaudeMCPBuilder:
         response = self.anthropic.messages.create(
             model="claude-3-7-sonnet-20250219",
             max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Here are three side view images of an object. Please analyze them."
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": side1_b64
+                            }
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": side2_b64
+                            }
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": side3_b64
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
         )
         
-        # Approximate output tokens (could be more precise by actually counting)
-        # Using a conservative estimate of 2 tokens per character
-        output_tokens = len(str(response.content)) * 2
+        # Debug: Print response type and content
+        print(f"Response type: {type(response.content)}")
+        print(f"Response content: {response.content}")
+        
+        # Extract the text content from response
+        if isinstance(response.content, list):
+            response_text = response.content[0].text if hasattr(response.content[0], 'text') else str(response.content[0])
+        else:
+            response_text = response.content.text if hasattr(response.content, 'text') else str(response.content)
+        
+        # Debug: Print processed response
+        print(f"Processed response: {response_text}")
+        
+        # Approximate output tokens
+        output_tokens = len(response_text) * 2
         await self.output_token_bucket.consume(int(output_tokens))
 
-        # Generate 3D model using Open3D
-        stl_path, brep_path = self._generate_3d_files(response.content)
+        # Generate 3D model using OpenSCAD
+        stl_path, brep_path = self._generate_3d_files(response_text)
 
         return stl_path, brep_path
 
-    def _create_prompt(self, side1: bytes, side2: bytes, side3: bytes) -> str:
+    def _create_prompt(self) -> str:
         """Create prompt for Claude based on the images"""
         return """
-        You are a 3D modeling expert. Analyze these three side view images and generate a 3D model specification.
-        
-        Output a Python dictionary containing the following information:
-        1. vertices: List of [x, y, z] coordinates for each vertex
-        2. triangles: List of [v1, v2, v3] indices defining triangular faces
-        3. dimensions: Dictionary with 'width', 'height', 'depth' in millimeters
-        
-        Format the output as valid Python code that can be evaluated. Example format:
+        Based on these three side view images, please:
+
+        1. First, describe the key features you observe from each view:
+        - Exact measurements and proportions
+        - Surface characteristics
+        - Any special features or details
+
+        2. Then, generate OpenSCAD code that will recreate this object precisely. The code should:
+        - Use exact measurements based on your analysis
+        - Properly implement all geometric features you observed
+        - Use OpenSCAD's CSG operations (union, difference, intersection) as needed
+        - Include detailed comments explaining each operation
+
+        3. Finally, provide the code in this format (and ONLY this format, no other text):
         {
-            'vertices': [[0,0,0], [1,0,0], [0,1,0], ...],
-            'triangles': [[0,1,2], [1,2,3], ...],
-            'dimensions': {'width': 100, 'height': 150, 'depth': 75}
+            'openscad_code': 'your complete OpenSCAD code here',
+            'dimensions': {
+                'width': measured_width,
+                'height': measured_height,
+                'depth': measured_depth
+            }
         }
-        
-        Focus on:
-        - Accurate proportions between dimensions
-        - Key geometric features
-        - Proper mesh topology
-        - Water-tight mesh (no holes)
+
+        Be precise and thorough in your analysis. The goal is to create an exact replica of the object shown in the images.
         """
 
-    def _generate_3d_files(self, claude_response: str) -> tuple[str, str]:
-        """Generate STL and BREP files using Open3D"""
+    def _extract_dict_from_response(self, response_text: str) -> dict:
+        """Extract the dictionary from Claude's response"""
         try:
-            # Extract the dictionary from Claude's response
-            # Find the first occurrence of a dictionary-like structure
-            start_idx = claude_response.find('{')
-            end_idx = claude_response.rfind('}') + 1
-            if start_idx == -1 or end_idx == 0:
-                raise ValueError("No valid dictionary found in response")
+            # Find the last occurrence of openscad_code and dimensions
+            # This helps avoid matching any earlier mentions in the analysis
+            code_start = response_text.rfind("'openscad_code':")
+            if code_start == -1:
+                raise ValueError("No OpenSCAD code found in response")
             
-            model_dict = eval(claude_response[start_idx:end_idx])
+            dims_start = response_text.rfind("'dimensions':")
+            if dims_start == -1:
+                raise ValueError("No dimensions found in response")
             
-            # Create mesh from the dictionary
-            mesh = o3d.geometry.TriangleMesh()
+            # Extract OpenSCAD code
+            code_text = response_text[code_start:dims_start].strip()
+            code_text = code_text.replace("'openscad_code':", "").strip()
             
-            # Add vertices and triangles
-            mesh.vertices = o3d.utility.Vector3dVector(model_dict['vertices'])
-            mesh.triangles = o3d.utility.Vector3iVector(model_dict['triangles'])
+            # Clean up the code text
+            if code_text.startswith("'"):
+                code_text = code_text[1:]
+            if code_text.endswith(","):
+                code_text = code_text[:-1]
+            if code_text.endswith("'"):
+                code_text = code_text[:-1]
             
-            # Compute normals for proper rendering
-            mesh.compute_vertex_normals()
+            # Clean up the OpenSCAD code
+            code_text = code_text.replace('\\n', '\n')
+            code_text = code_text.replace('\\\\', '\\')
             
-            # Optional: Orient triangles consistently
-            mesh.orient_triangles()
+            # Extract dimensions section
+            dims_text = response_text[dims_start:]
+            # Find the closing brace of the entire dictionary
+            brace_count = 0
+            dims_end = -1
             
-            # Save as STL
-            stl_path = os.path.join("output", "output.stl")
-            o3d.io.write_triangle_mesh(stl_path, mesh)
+            for i, char in enumerate(dims_text):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        dims_end = i + 1
+                        break
             
-            # Save as BREP (using a simple conversion for demonstration)
-            brep_path = os.path.join("output", "output.brep")
-            # Note: Actual BREP conversion would require additional libraries
+            if dims_end == -1:
+                raise ValueError("Could not find end of dimensions section")
+                
+            dims_text = dims_text[:dims_end]
+            
+            # Extract just the dimensions dictionary part
+            dims_dict_start = dims_text.find('{', dims_text.find("'dimensions':"))
+            if dims_dict_start == -1:
+                raise ValueError("Could not find dimensions dictionary")
+            
+            dims_text = dims_text[dims_dict_start:].strip()
+            
+            # Remove outer braces
+            dims_text = dims_text.strip('{}')
+            
+            # Parse dimensions
+            dimensions = {}
+            for pair in dims_text.split(','):
+                if ':' not in pair:
+                    continue
+                key, value = pair.split(':')
+                key = key.strip().strip("'").strip('"')
+                # Clean up the value and convert to int
+                value = value.strip().strip("'").strip('"')
+                try:
+                    dimensions[key] = int(value)
+                except ValueError:
+                    print(f"Warning: Could not parse dimension value: {value}")
+                    continue
+            
+            # Create the final dictionary
+            result = {
+                'openscad_code': code_text,
+                'dimensions': dimensions
+            }
+            
+            # Print debug info
+            print("\nExtracted OpenSCAD code:")
+            print(code_text)
+            print("\nExtracted dimensions:")
+            print(dimensions)
+            
+            # Validate required keys
+            required_keys = ['openscad_code', 'dimensions']
+            if not all(key in result for key in required_keys):
+                raise ValueError(f"Missing required keys. Found: {list(result.keys())}")
+            
+            # Validate dimensions
+            required_dims = ['width', 'height', 'depth']
+            if not all(key in result['dimensions'] for key in required_dims):
+                raise ValueError(f"Missing required dimensions. Found: {list(result['dimensions'].keys())}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error extracting dictionary: {str(e)}")
+            print(f"Response text: {response_text}")
+            raise ValueError(f"Failed to extract dictionary from response: {str(e)}")
+
+    def _find_openscad_path(self) -> str:
+        """Find the OpenSCAD executable path"""
+        # Common installation paths for OpenSCAD on Windows
+        possible_paths = [
+            r"C:\Program Files\OpenSCAD\openscad.exe",
+            r"C:\Program Files (x86)\OpenSCAD\openscad.exe",
+            os.path.expanduser("~\\AppData\\Local\\Programs\\OpenSCAD\\openscad.exe")
+        ]
+        
+        # Check common installation paths first
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+                
+        # Check if OpenSCAD is in PATH
+        import subprocess
+        try:
+            result = subprocess.run(['where', 'openscad'], capture_output=True, text=True)
+            if result.returncode == 0:
+                # Take the first path found
+                return result.stdout.strip().split('\n')[0]
+        except Exception:
+            pass
+            
+        raise ValueError(
+            "OpenSCAD not found. Please install it from https://openscad.org/downloads.html "
+            "and make sure it's in your system PATH or installed in the default location."
+        )
+
+    def _generate_3d_files(self, claude_response: str) -> tuple[str, str]:
+        """Generate STL and BREP files using OpenSCAD"""
+        try:
+            # Extract the dictionary containing OpenSCAD code and dimensions
+            model_dict = self._extract_dict_from_response(claude_response)
+            
+            # Get the OpenSCAD code and ensure it ends with a newline
+            openscad_code = model_dict['openscad_code'].strip() + '\n'
+            
+            # Create output directory if it doesn't exist
+            output_dir = os.path.abspath(os.path.join("output"))
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Create paths using proper Windows path handling
+            scad_path = os.path.join(output_dir, "model.scad")
+            stl_path = os.path.join(output_dir, "output.stl")
+            brep_path = os.path.join(output_dir, "output.brep")
+            
+            # Write OpenSCAD file
+            with open(scad_path, 'w') as f:
+                f.write(openscad_code)
+            
+            print(f"Generated OpenSCAD file at: {scad_path}")
+            
+            # Find OpenSCAD executable
+            openscad_exe = self._find_openscad_path()
+            
+            # Use subprocess.run instead of os.system for better path handling
+            import subprocess
+            try:
+                # Run OpenSCAD with properly quoted paths
+                result = subprocess.run([
+                    openscad_exe,
+                    "-o", stl_path,
+                    scad_path
+                ], capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    print("OpenSCAD Error Output:")
+                    print(result.stderr)
+                    raise ValueError(f"OpenSCAD command failed with exit code {result.returncode}")
+                
+            except Exception as e:
+                print(f"Error running OpenSCAD: {str(e)}")
+                raise ValueError("Failed to run OpenSCAD command. Please ensure OpenSCAD is properly installed.")
+            
+            # Save dimensions as BREP
             with open(brep_path, 'w') as f:
                 f.write(str(model_dict['dimensions']))
             
@@ -157,15 +363,4 @@ class ClaudeMCPBuilder:
             
         except Exception as e:
             print(f"Error generating 3D files: {str(e)}")
-            # Create a simple fallback mesh
-            mesh = o3d.geometry.TriangleMesh.create_box(width=1.0, height=1.0, depth=1.0)
-            mesh.compute_vertex_normals()
-            
-            stl_path = os.path.join("output", "output.stl")
-            o3d.io.write_triangle_mesh(stl_path, mesh)
-            
-            brep_path = os.path.join("output", "output.brep")
-            with open(brep_path, 'w') as f:
-                f.write("Fallback model: 1x1x1 cube")
-            
-            return stl_path, brep_path 
+            raise e 
