@@ -96,31 +96,76 @@ class ClaudeMCPBuilder:
 
     def _create_prompt(self, side1: bytes, side2: bytes, side3: bytes) -> str:
         """Create prompt for Claude based on the images"""
-        return f"""
-        Analyze these three side views of an object and generate a 3D model.
-        Consider the following aspects:
-        1. Dimensions and proportions
-        2. Surface features and details
-        3. Geometric relationships between sides
+        return """
+        You are a 3D modeling expert. Analyze these three side view images and generate a 3D model specification.
         
-        Generate a detailed 3D model specification that can be used with Open3D.
+        Output a Python dictionary containing the following information:
+        1. vertices: List of [x, y, z] coordinates for each vertex
+        2. triangles: List of [v1, v2, v3] indices defining triangular faces
+        3. dimensions: Dictionary with 'width', 'height', 'depth' in millimeters
+        
+        Format the output as valid Python code that can be evaluated. Example format:
+        {
+            'vertices': [[0,0,0], [1,0,0], [0,1,0], ...],
+            'triangles': [[0,1,2], [1,2,3], ...],
+            'dimensions': {'width': 100, 'height': 150, 'depth': 75}
+        }
+        
+        Focus on:
+        - Accurate proportions between dimensions
+        - Key geometric features
+        - Proper mesh topology
+        - Water-tight mesh (no holes)
         """
 
     def _generate_3d_files(self, claude_response: str) -> tuple[str, str]:
         """Generate STL and BREP files using Open3D"""
-        # Create a simple mesh for demonstration
-        mesh = o3d.geometry.TriangleMesh.create_coordinate_frame()
-        
-        # Save as STL
-        stl_path = os.path.join("output", "output.stl")
-        o3d.io.write_triangle_mesh(stl_path, mesh)
-        
-        # Save as BREP (using a simple conversion for demonstration)
-        brep_path = os.path.join("output", "output.brep")
-        # Note: Actual BREP conversion would require additional libraries
-        
-        # Create an empty BREP file for demonstration
-        with open(brep_path, 'w') as f:
-            f.write("")
-        
-        return stl_path, brep_path 
+        try:
+            # Extract the dictionary from Claude's response
+            # Find the first occurrence of a dictionary-like structure
+            start_idx = claude_response.find('{')
+            end_idx = claude_response.rfind('}') + 1
+            if start_idx == -1 or end_idx == 0:
+                raise ValueError("No valid dictionary found in response")
+            
+            model_dict = eval(claude_response[start_idx:end_idx])
+            
+            # Create mesh from the dictionary
+            mesh = o3d.geometry.TriangleMesh()
+            
+            # Add vertices and triangles
+            mesh.vertices = o3d.utility.Vector3dVector(model_dict['vertices'])
+            mesh.triangles = o3d.utility.Vector3iVector(model_dict['triangles'])
+            
+            # Compute normals for proper rendering
+            mesh.compute_vertex_normals()
+            
+            # Optional: Orient triangles consistently
+            mesh.orient_triangles()
+            
+            # Save as STL
+            stl_path = os.path.join("output", "output.stl")
+            o3d.io.write_triangle_mesh(stl_path, mesh)
+            
+            # Save as BREP (using a simple conversion for demonstration)
+            brep_path = os.path.join("output", "output.brep")
+            # Note: Actual BREP conversion would require additional libraries
+            with open(brep_path, 'w') as f:
+                f.write(str(model_dict['dimensions']))
+            
+            return stl_path, brep_path
+            
+        except Exception as e:
+            print(f"Error generating 3D files: {str(e)}")
+            # Create a simple fallback mesh
+            mesh = o3d.geometry.TriangleMesh.create_box(width=1.0, height=1.0, depth=1.0)
+            mesh.compute_vertex_normals()
+            
+            stl_path = os.path.join("output", "output.stl")
+            o3d.io.write_triangle_mesh(stl_path, mesh)
+            
+            brep_path = os.path.join("output", "output.brep")
+            with open(brep_path, 'w') as f:
+                f.write("Fallback model: 1x1x1 cube")
+            
+            return stl_path, brep_path 
