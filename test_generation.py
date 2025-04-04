@@ -9,10 +9,10 @@ async def test_model_generation():
     # Initialize the builder
     builder = ClaudeMCPBuilder()
     
-    # Use sample images
-    side1_path = "sample_images/side1.jpg"
-    side2_path = "sample_images/side2.jpg"
-    side3_path = "sample_images/side3.jpg"
+    # Use v2 sample images
+    side1_path = "sample_images/side1v2.jpg"
+    side2_path = "sample_images/side2v2.jpg"
+    side3_path = "sample_images/side3v2.jpg"
     
     try:
         # Generate the model

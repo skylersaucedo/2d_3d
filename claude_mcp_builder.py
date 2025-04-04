@@ -80,6 +80,8 @@ class ClaudeMCPBuilder:
         
         # Wait if needed based on request rate limit
         await self.request_bucket.consume(1)
+
+        PROMPT = "Here are three side view images of an object. Please analyze them."
         
         # Get Claude's response
         response = self.anthropic.messages.create(
@@ -91,7 +93,7 @@ class ClaudeMCPBuilder:
                     "content": [
                         {
                             "type": "text",
-                            "text": "Here are three side view images of an object. Please analyze them."
+                            "text": PROMPT
                         },
                         {
                             "type": "image",
@@ -151,130 +153,85 @@ class ClaudeMCPBuilder:
     def _create_prompt(self) -> str:
         """Create prompt for Claude based on the images"""
         return """
-        Based on these three side view images, please:
+        Analyze these three orthographic views and provide a 3D model definition.
 
-        1. First, describe the key features you observe from each view:
-        - Exact measurements and proportions
-        - Surface characteristics
-        - Any special features or details
+        After your analysis, you MUST respond with ONLY a dictionary in this EXACT format (no other text):
 
-        2. Then, generate OpenSCAD code that will recreate this object precisely. The code should:
-        - Use exact measurements based on your analysis
-        - Properly implement all geometric features you observed
-        - Use OpenSCAD's CSG operations (union, difference, intersection) as needed
-        - Include detailed comments explaining each operation
-
-        3. Finally, provide the code in this format (and ONLY this format, no other text):
         {
-            'openscad_code': 'your complete OpenSCAD code here',
-            'dimensions': {
-                'width': measured_width,
-                'height': measured_height,
-                'depth': measured_depth
+            "openscad_code": "// Core dimensions\nwidth = 60;  // Width\ndepth = 50;  // Depth\nheight = 75;  // Total height\ncorner_radius = 35;  // Corner radius\nhole_diameter = 25;  // Hole diameter\n\nmodule main() {\n    difference() {\n        // Base block\n        cube([width, depth, height]);\n        \n        // Rounded corner\n        translate([width-corner_radius, 0, 0])\n            cube([corner_radius, corner_radius, height]);\n        \n        // Through hole\n        translate([width/2, depth/2, -1])\n            cylinder(h=height+2, d=hole_diameter);\n    }\n}\n\nmain();",
+            "dimensions": {
+                "width": 60,
+                "height": 75,
+                "depth": 50
             }
         }
 
-        Be precise and thorough in your analysis. The goal is to create an exact replica of the object shown in the images.
-        """
+        CRITICAL REQUIREMENTS:
+        1. Use DOUBLE QUOTES for all strings
+        2. Use proper escaping for newlines (\n)
+        3. Include ONLY the dictionary in your response
+        4. NO additional text or analysis
+        5. Ensure all dimensions are integers
+        6. Keep the exact key names shown above"""
 
     def _extract_dict_from_response(self, response_text: str) -> dict:
         """Extract the dictionary from Claude's response"""
         try:
-            # Find the last occurrence of openscad_code and dimensions
-            # This helps avoid matching any earlier mentions in the analysis
-            code_start = response_text.rfind("'openscad_code':")
-            if code_start == -1:
-                raise ValueError("No OpenSCAD code found in response")
+            # Find the dictionary start
+            dict_start = response_text.find('{')
+            if dict_start == -1:
+                raise ValueError("No dictionary found in response")
+
+            # Find the dictionary end
+            dict_end = response_text.rfind('}')
+            if dict_end == -1:
+                raise ValueError("No closing brace found")
+
+            # Extract the dictionary string
+            dict_str = response_text[dict_start:dict_end + 1]
+
+            # Clean up the string
+            dict_str = dict_str.strip()
             
-            dims_start = response_text.rfind("'dimensions':")
-            if dims_start == -1:
-                raise ValueError("No dimensions found in response")
+            # Replace single quotes with double quotes
+            dict_str = dict_str.replace("'", '"')
             
-            # Extract OpenSCAD code
-            code_text = response_text[code_start:dims_start].strip()
-            code_text = code_text.replace("'openscad_code':", "").strip()
-            
-            # Clean up the code text
-            if code_text.startswith("'"):
-                code_text = code_text[1:]
-            if code_text.endswith(","):
-                code_text = code_text[:-1]
-            if code_text.endswith("'"):
-                code_text = code_text[:-1]
-            
-            # Clean up the OpenSCAD code
-            code_text = code_text.replace('\\n', '\n')
-            code_text = code_text.replace('\\\\', '\\')
-            
-            # Extract dimensions section
-            dims_text = response_text[dims_start:]
-            # Find the closing brace of the entire dictionary
-            brace_count = 0
-            dims_end = -1
-            
-            for i, char in enumerate(dims_text):
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        dims_end = i + 1
-                        break
-            
-            if dims_end == -1:
-                raise ValueError("Could not find end of dimensions section")
-                
-            dims_text = dims_text[:dims_end]
-            
-            # Extract just the dimensions dictionary part
-            dims_dict_start = dims_text.find('{', dims_text.find("'dimensions':"))
-            if dims_dict_start == -1:
-                raise ValueError("Could not find dimensions dictionary")
-            
-            dims_text = dims_text[dims_dict_start:].strip()
-            
-            # Remove outer braces
-            dims_text = dims_text.strip('{}')
-            
-            # Parse dimensions
-            dimensions = {}
-            for pair in dims_text.split(','):
-                if ':' not in pair:
-                    continue
-                key, value = pair.split(':')
-                key = key.strip().strip("'").strip('"')
-                # Clean up the value and convert to int
-                value = value.strip().strip("'").strip('"')
-                try:
-                    dimensions[key] = int(value)
-                except ValueError:
-                    print(f"Warning: Could not parse dimension value: {value}")
-                    continue
-            
-            # Create the final dictionary
-            result = {
-                'openscad_code': code_text,
-                'dimensions': dimensions
-            }
-            
-            # Print debug info
-            print("\nExtracted OpenSCAD code:")
-            print(code_text)
-            print("\nExtracted dimensions:")
-            print(dimensions)
-            
-            # Validate required keys
+            # Clean up newlines in OpenSCAD code
+            import json
+            try:
+                # First parse attempt
+                result = json.loads(dict_str)
+            except json.JSONDecodeError:
+                # If failed, try to clean up the OpenSCAD code
+                import re
+                # Find the OpenSCAD code section
+                code_match = re.search(r'"openscad_code":\s*"([^"]*)"', dict_str)
+                if code_match:
+                    code = code_match.group(1)
+                    # Clean up the code
+                    code = code.replace('\n', '\\n')
+                    # Replace back in the string
+                    dict_str = re.sub(r'"openscad_code":\s*"[^"]*"', f'"openscad_code": "{code}"', dict_str)
+                    # Try parsing again
+                    result = json.loads(dict_str)
+                else:
+                    raise ValueError("Could not find OpenSCAD code in response")
+
+            # Validate the structure
+            if not isinstance(result, dict):
+                raise ValueError("Extracted content is not a dictionary")
+
             required_keys = ['openscad_code', 'dimensions']
             if not all(key in result for key in required_keys):
                 raise ValueError(f"Missing required keys. Found: {list(result.keys())}")
-            
+
             # Validate dimensions
             required_dims = ['width', 'height', 'depth']
             if not all(key in result['dimensions'] for key in required_dims):
                 raise ValueError(f"Missing required dimensions. Found: {list(result['dimensions'].keys())}")
-            
+
             return result
-            
+
         except Exception as e:
             print(f"Error extracting dictionary: {str(e)}")
             print(f"Response text: {response_text}")
@@ -316,7 +273,7 @@ class ClaudeMCPBuilder:
             model_dict = self._extract_dict_from_response(claude_response)
             
             # Get the OpenSCAD code and ensure it ends with a newline
-            openscad_code = model_dict['openscad_code'].strip() + '\n'
+            openscad_code = model_dict['openscad_code'].replace('\\n', '\n').strip() + '\n'
             
             # Create output directory if it doesn't exist
             output_dir = os.path.abspath(os.path.join("output"))
@@ -332,17 +289,18 @@ class ClaudeMCPBuilder:
                 f.write(openscad_code)
             
             print(f"Generated OpenSCAD file at: {scad_path}")
+            print(f"OpenSCAD code:\n{openscad_code}")
             
             # Find OpenSCAD executable
             openscad_exe = self._find_openscad_path()
             
-            # Use subprocess.run instead of os.system for better path handling
+            # Run OpenSCAD using subprocess for better path handling
             import subprocess
             try:
-                # Run OpenSCAD with properly quoted paths
                 result = subprocess.run([
                     openscad_exe,
-                    "-o", stl_path,
+                    "-o",
+                    stl_path,
                     scad_path
                 ], capture_output=True, text=True)
                 
@@ -353,6 +311,7 @@ class ClaudeMCPBuilder:
                 
             except Exception as e:
                 print(f"Error running OpenSCAD: {str(e)}")
+                print(f"Command attempted: {openscad_exe} -o {stl_path} {scad_path}")
                 raise ValueError("Failed to run OpenSCAD command. Please ensure OpenSCAD is properly installed.")
             
             # Save dimensions as BREP
