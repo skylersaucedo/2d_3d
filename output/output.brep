@@ -1,1 +1,1 @@
-{'width': 60, 'height': 75, 'depth': 50}
+{'total_height': 75.0, 'base_width': 60.0, 'base_depth': 50.0, 'top_width': 25.0, 'hole_diameter': 25.0, 'hole_depth': 65.0, 'hole_x_offset': 30.81, 'hole_y_offset': 24.71, 'fillet_radius': 35.0, 'fillet_height': 45.0, 'base_height': 35.0, 'top_height': 30.0}

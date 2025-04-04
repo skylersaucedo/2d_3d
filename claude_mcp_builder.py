@@ -60,20 +60,21 @@ class ClaudeMCPBuilder:
             image_bytes = f.read()
             return base64.b64encode(image_bytes).decode('utf-8')
         
-    async def generate_model(self, side1_path: str, side2_path: str, side3_path: str) -> tuple[str, str]:
+    async def generate_model(self, side1_path: str, side2_path: str, side3_path: str, side4_path: str = None) -> tuple[str, str]:
         """
-        Generate a 3D model from three side images using Claude 3.7 MCP
+        Generate a 3D model from three or four side images using Claude 3.7 MCP
         """
         # Read and encode images
         side1_b64 = self._encode_image(side1_path)
         side2_b64 = self._encode_image(side2_path)
         side3_b64 = self._encode_image(side3_path)
+        side4_b64 = self._encode_image(side4_path) if side4_path else None
 
         # Create prompt for Claude
         prompt = self._create_prompt()
         
         # Calculate approximate input tokens
-        total_input_tokens = self.BASE_PROMPT_TOKENS + (self.IMAGE_TOKENS * 3)
+        total_input_tokens = self.BASE_PROMPT_TOKENS + (self.IMAGE_TOKENS * (4 if side4_path else 3))
         
         # Wait if needed based on input token rate limit
         await self.input_token_bucket.consume(total_input_tokens)
@@ -81,51 +82,65 @@ class ClaudeMCPBuilder:
         # Wait if needed based on request rate limit
         await self.request_bucket.consume(1)
 
-        PROMPT = "Here are three side view images of an object. Please analyze them."
+        PROMPT = "Here are multiple side view images of an object. Please analyze them carefully to understand all features and dimensions."
         
+        # Prepare message content
+        message_content = [
+            {
+                "type": "text",
+                "text": PROMPT
+            },
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": side1_b64
+                }
+            },
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": side2_b64
+                }
+            },
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": side3_b64
+                }
+            }
+        ]
+
+        # Add fourth image if provided
+        if side4_b64:
+            message_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": side4_b64
+                }
+            })
+
+        # Add the prompt
+        message_content.append({
+            "type": "text",
+            "text": prompt
+        })
+
         # Get Claude's response
         response = self.anthropic.messages.create(
             model="claude-3-7-sonnet-20250219",
             max_tokens=1000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": PROMPT
-                        },
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": side1_b64
-                            }
-                        },
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": side2_b64
-                            }
-                        },
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": side3_b64
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt
-                        }
-                    ]
-                }
-            ]
+            messages=[{
+                "role": "user",
+                "content": message_content
+            }]
         )
         
         # Debug: Print response type and content
@@ -153,26 +168,53 @@ class ClaudeMCPBuilder:
     def _create_prompt(self) -> str:
         """Create prompt for Claude based on the images"""
         return """
-        Analyze these three orthographic views and provide a 3D model definition.
+        You are a CAD expert. Analyze these technical drawings and create a precise 3D model based on the provided orthographic views. Your task is to generate complete, executable OpenSCAD code.
 
-        After your analysis, you MUST respond with ONLY a dictionary in this EXACT format (no other text):
+        1. DIMENSIONAL ANALYSIS:
+           - Extract all explicit dimensions from the drawings
+           - Calculate any implicit dimensions based on scale and relationships
+           - Define clear variable names for all dimensions
+           - Document units (assume mm if not specified)
+
+        2. FEATURE ANALYSIS:
+           - Identify the base shape and primary features
+           - Note all secondary features (holes, cuts, threads, etc.)
+           - Document feature relationships and positions
+           - Identify any patterns or symmetry
+
+        3. OPENSCAD IMPLEMENTATION:
+           - Start with clear variable definitions for ALL dimensions
+           - Create separate modules for complex features
+           - Use proper boolean operations (union, difference, intersection)
+           - ALWAYS include a final module call to render the object
+           - Use high resolution ($fn) for curved surfaces
+           - Add clear comments explaining each major step
+
+        After analysis, respond with ONLY a dictionary in this EXACT format:
 
         {
-            "openscad_code": "// Core dimensions\nwidth = 60;  // Width\ndepth = 50;  // Depth\nheight = 75;  // Total height\ncorner_radius = 35;  // Corner radius\nhole_diameter = 25;  // Hole diameter\n\nmodule main() {\n    difference() {\n        // Base block\n        cube([width, depth, height]);\n        \n        // Rounded corner\n        translate([width-corner_radius, 0, 0])\n            cube([corner_radius, corner_radius, height]);\n        \n        // Through hole\n        translate([width/2, depth/2, -1])\n            cylinder(h=height+2, d=hole_diameter);\n    }\n}\n\nmain();",
+            "openscad_code": "// Your OpenSCAD code with proper newline escaping (\\n)",
             "dimensions": {
-                "width": 60,
-                "height": 75,
-                "depth": 50
+                "head_diameter": 10,
+                "head_height": 5,
+                "shaft_length": 20,
+                "shaft_diameter": 8,
+                "thread_pitch": 1.25,
+                "head_width": 12
             }
         }
 
         CRITICAL REQUIREMENTS:
         1. Use DOUBLE QUOTES for all strings
-        2. Use proper escaping for newlines (\n)
+        2. Escape newlines with \\n in OpenSCAD code
         3. Include ONLY the dictionary in your response
-        4. NO additional text or analysis
-        5. Ensure all dimensions are integers
-        6. Keep the exact key names shown above"""
+        4. Set $fn=64 or higher for curved surfaces
+        5. Use clear variable names prefixed with their category
+        6. Include comprehensive comments in the code
+        7. ALWAYS end the code with a module call to render the object
+        8. Ensure all dimensions are defined as variables at the start
+        9. Use proper scoping and modular design
+        10. All dimensions must be numeric values"""
 
     def _extract_dict_from_response(self, response_text: str) -> dict:
         """Extract the dictionary from Claude's response"""
@@ -189,30 +231,21 @@ class ClaudeMCPBuilder:
 
             # Extract the dictionary string
             dict_str = response_text[dict_start:dict_end + 1]
-
-            # Clean up the string
             dict_str = dict_str.strip()
-            
-            # Replace single quotes with double quotes
             dict_str = dict_str.replace("'", '"')
-            
+
             # Clean up newlines in OpenSCAD code
             import json
             try:
-                # First parse attempt
                 result = json.loads(dict_str)
             except json.JSONDecodeError:
                 # If failed, try to clean up the OpenSCAD code
                 import re
-                # Find the OpenSCAD code section
                 code_match = re.search(r'"openscad_code":\s*"([^"]*)"', dict_str)
                 if code_match:
                     code = code_match.group(1)
-                    # Clean up the code
                     code = code.replace('\n', '\\n')
-                    # Replace back in the string
                     dict_str = re.sub(r'"openscad_code":\s*"[^"]*"', f'"openscad_code": "{code}"', dict_str)
-                    # Try parsing again
                     result = json.loads(dict_str)
                 else:
                     raise ValueError("Could not find OpenSCAD code in response")
@@ -221,20 +254,31 @@ class ClaudeMCPBuilder:
             if not isinstance(result, dict):
                 raise ValueError("Extracted content is not a dictionary")
 
-            required_keys = ['openscad_code', 'dimensions']
-            if not all(key in result for key in required_keys):
-                raise ValueError(f"Missing required keys. Found: {list(result.keys())}")
+            if 'openscad_code' not in result:
+                raise ValueError("Missing OpenSCAD code in response")
 
-            # Validate dimensions
-            required_dims = ['width', 'height', 'depth']
-            if not all(key in result['dimensions'] for key in required_dims):
-                raise ValueError(f"Missing required dimensions. Found: {list(result['dimensions'].keys())}")
+            # Handle specialized dimensions
+            if 'dimensions' in result:
+                dims = result['dimensions']
+                # Map specialized dimensions to required format
+                if all(key in dims for key in ['head_diameter', 'shaft_length', 'head_height']):
+                    # Use the largest dimension for width/depth
+                    max_diameter = max(float(dims.get('head_diameter', 0)), float(dims.get('shaft_diameter', 0)))
+                    result['dimensions'] = {
+                        'width': int(max_diameter),
+                        'depth': int(max_diameter),
+                        'height': int(float(dims.get('shaft_length', 0)) + float(dims.get('head_height', 0)))
+                    }
+                else:
+                    print(f"Found dimensions: {list(dims.keys())}")
+                    raise ValueError("Missing required dimensions")
 
             return result
 
         except Exception as e:
             print(f"Error extracting dictionary: {str(e)}")
-            print(f"Response text: {response_text}")
+            if 'dims' in locals():
+                print(f"Found dimensions: {list(dims.keys())}")
             raise ValueError(f"Failed to extract dictionary from response: {str(e)}")
 
     def _find_openscad_path(self) -> str:
